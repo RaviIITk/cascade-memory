@@ -56,6 +56,15 @@ strict = true
 packages = ["cascade_memory"]
 mypy_path = "src"
 
+# adapters/*.py target optional third-party frameworks (langchain, strands, ...)
+# that are not hard dependencies and may or may not be installed in a given
+# environment -- relax import/decorator strictness for just these modules so CI
+# behaves the same whether or not those extras happen to be present.
+[[tool.mypy.overrides]]
+module = "cascade_memory.adapters.*"
+ignore_missing_imports = true
+disable_error_code = ["untyped-decorator", "unused-ignore", "call-overload"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra -q"

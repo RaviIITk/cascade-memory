@@ -29,18 +29,27 @@ def make_deepagents_middleware(middleware: CascadingMemoryMiddleware, session_id
     """
     try:
         from langchain.agents.middleware import AgentMiddleware  # type: ignore[import-not-found]
+        from langchain_core.messages import (  # type: ignore[import-not-found]
+            convert_to_messages,
+            convert_to_openai_messages,
+        )
     except ImportError as exc:
         raise ImportError(
             "langchain>=1.0 is required for cascade_memory.adapters.deepagents"
         ) from exc
 
+    def _compact(request: Any) -> Any:
+        # LangChain passes BaseMessage objects (HumanMessage/AIMessage/...), but
+        # cascade_memory's middleware and JSON-backed stores work on plain dicts.
+        as_dicts = convert_to_openai_messages(request.messages)
+        compacted = middleware.process(as_dicts, session_id=session_id)
+        return request.override(messages=convert_to_messages(compacted))
+
     class CascadingMemoryAgentMiddleware(AgentMiddleware):  # type: ignore[misc]
         def wrap_model_call(self, request: Any, handler: Any) -> Any:
-            compacted = middleware.process(request.messages, session_id=session_id)
-            return handler(request.override(messages=compacted))
+            return handler(_compact(request))
 
         async def awrap_model_call(self, request: Any, handler: Any) -> Any:
-            compacted = middleware.process(request.messages, session_id=session_id)
-            return await handler(request.override(messages=compacted))
+            return await handler(_compact(request))
 
     return CascadingMemoryAgentMiddleware()
