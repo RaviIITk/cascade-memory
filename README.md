@@ -187,6 +187,66 @@ hook = CascadingMemoryHook(middleware, session_id="session-123")
 # register hook.before_model_call per the SDK's hook registration API
 ```
 
+### 7. Integrating as a hook/middleware plugin in *any* framework
+
+`cascade_memory.adapters` ships ready-made wrappers for raw chat loops, LangChain,
+and the Claude Agent SDK — but the middleware is designed to drop into **any**
+agentic framework's hook/middleware system, even ones with no dedicated adapter
+yet. The contract is always the same one-line shape:
+
+```python
+new_messages = middleware.process(messages, session_id=session_id, system_prompt=system_prompt)
+```
+
+Because `process()` is a pure `list[dict] -> list[dict]` transform with no side
+effects on the framework's own objects, plugging it in is just a matter of finding
+where your framework lets you intercept the outgoing message list right before the
+LLM call, and calling `process()` there. Three common shapes:
+
+**1. Pre-call hook (most frameworks)** — register a callback that runs before each
+model invocation and returns the (possibly modified) messages:
+
+```python
+def cascade_memory_hook(messages: list[dict], **context) -> list[dict]:
+    return middleware.process(messages, session_id=context["session_id"])
+
+agent_framework.register_pre_model_hook(cascade_memory_hook)
+```
+
+**2. Middleware/interceptor chain (frameworks with an explicit middleware stack)**
+— wrap the next handler so it always receives compacted input:
+
+```python
+class CascadingMemoryPlugin:
+    def __init__(self, middleware, session_id):
+        self.middleware = middleware
+        self.session_id = session_id
+
+    def __call__(self, request, call_next):
+        request.messages = self.middleware.process(request.messages, session_id=self.session_id)
+        return call_next(request)
+
+agent_framework.use_middleware(CascadingMemoryPlugin(middleware, session_id="session-123"))
+```
+
+**3. Decorator around the model-call function** — for frameworks that just expose
+a plain function you call to talk to the model (this is exactly what
+`cascade_memory.adapters.wrap_chat_function` does — see §6 above):
+
+```python
+def with_cascading_memory(chat_fn, middleware, session_id):
+    def wrapped(messages, **kwargs):
+        return chat_fn(middleware.process(messages, session_id=session_id), **kwargs)
+    return wrapped
+
+agent.chat = with_cascading_memory(agent.chat, middleware, session_id="session-123")
+```
+
+Whichever shape your framework uses, the rule is: **call `process()` last, right
+before the messages leave your code for the model** — that's what guarantees the
+context sent to the LLM is always within `token_threshold`, regardless of how big
+the underlying conversation history has grown.
+
 ## Full minimal example
 
 ```python
