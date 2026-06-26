@@ -6,51 +6,228 @@ When a conversation's token count exceeds a configurable threshold, `cascade-mem
 compresses everything except the last `N` messages into a structured summary block
 (carrying forward task progress, completed/remaining steps, and key decisions) and
 keeps the original raw messages retrievable by `memory_id` via a `load_memory` tool.
-Each time the threshold fires again, a new summary block is appended — never merged
-into prior ones — forming a cascade of compression spans across the session.
+Each time the threshold fires again, a **new** summary block is appended — never
+merged into prior ones — forming a cascade of compression spans across the session:
+
+```
+[system prompt]
+summary_block_1 (memory_id: mem_001)   <- oldest compressed span
+summary_block_2 (memory_id: mem_002)
+...
+summary_block_n (memory_id: mem_00n)   <- most recent compressed span
+[preserved last N raw messages]
+[current turn]
+```
 
 ## Install
 
+> Not yet published to PyPI — install directly from GitHub or from a local clone for now.
+
 ```bash
-pip install cascade-memory
+# straight from GitHub, no clone needed
+pip install git+https://github.com/RaviIITk/cascade-memory.git
+
+# or, from a local clone
+git clone https://github.com/RaviIITk/cascade-memory.git
+cd cascade-memory
+pip install -e .          # editable install
+# pip install -e ".[dev]" # + test/lint/type-check tooling
 ```
 
-## Quick start
+Once published, the above will collapse to `pip install cascade-memory`.
+
+## How it works, end to end
+
+### 1. Implement `ModelClient` for your summarizer call
+
+The package ships zero provider SDKs. You give it **one object** with a `complete()`
+method — wrap whatever LLM client you already use (Anthropic, OpenAI, a local model,
+anything). This is a *separate* call from your main agent's model; it only runs when
+history needs compressing.
+
+```python
+from cascade_memory import ModelClient
+
+class MySummarizerClient:
+    def complete(self, messages: list[dict], **kwargs) -> str:
+        # messages is [{"role": "system", "content": ...}, {"role": "user", "content": ...}]
+        # return the assistant's raw text response (cascade-memory parses the JSON itself)
+        response = my_llm_sdk.chat(messages=messages, model="gpt-4o-mini")
+        return response.text
+```
+
+Any object satisfying `ModelClient` (structurally — no subclassing required) works.
+
+### 2. Configure and build the middleware
 
 ```python
 from cascade_memory import CascadingMemoryMiddleware, MemoryConfig
 
-class MySummarizerClient:
-    """Implements the ModelClient protocol: complete(messages) -> str."""
-    def complete(self, messages, **kwargs):
-        return my_llm.chat(messages)  # any provider, your own wiring
-
 config = MemoryConfig(
     summarizer_client=MySummarizerClient(),
-    token_threshold=10_000,
-    preserve_last_n=20,
-    storage_backend="filesystem",
-    storage_path="./memory",
+    token_threshold=10_000,     # default: compress once context exceeds this many tokens
+    preserve_last_n=20,         # default: always keep the last 20 messages verbatim
+    storage_backend="filesystem",  # or "s3"
+    storage_path="./memory",       # fs root dir, or S3 bucket name when backend="s3"
 )
 middleware = CascadingMemoryMiddleware(config)
-
-compacted_messages = middleware.process(messages, session_id="session-123")
-# send compacted_messages to your main agent's LLM call as usual
 ```
 
-To let the agent recover original content behind a summary block, register
-`cascade_memory.tools.LOAD_MEMORY_TOOL_SPEC` as a tool and route calls through
-`LoadMemoryHandler(store, session_id)`.
+Other `MemoryConfig` fields:
 
-## Storage backends
+| Field | Default | Purpose |
+|---|---|---|
+| `summarizer_client` | required | Your `ModelClient` for the summarization call |
+| `token_threshold` | `10_000` | Trigger point for compression |
+| `preserve_last_n` | `20` | Messages always kept raw |
+| `token_counter` | tiktoken `cl100k_base` | Swap in your own `Callable[[list[dict]], int]` to match your model's tokenizer |
+| `storage_backend` | `"filesystem"` | `"filesystem"` or `"s3"` |
+| `storage_path` | `"./memory"` | FS root, or S3 bucket name |
+| `store` | `None` | Pass a custom `MemoryStore` instance directly instead of backend/path |
 
-- `filesystem` (default): `./memory/{session_id}/state.json` and `.../records/{memory_id}.json`.
-- `s3`: same key layout under `s3://{bucket}/{prefix}/...`.
+### 3. Run every message list through it before calling your main agent's LLM
 
-## Adapters
+This is a pure function: `messages -> messages`, keyed by `session_id`. Call it
+immediately before every turn, anywhere in your loop:
 
-`cascade_memory.adapters` ships a generic `wrap_chat_function` for any raw chat
-function, plus optional LangChain and Claude Agent SDK adapters.
+```python
+session_id = "user-42-conversation-7"
+
+def run_turn(history: list[dict]) -> dict:
+    compacted = middleware.process(history, session_id=session_id, system_prompt="You are a helpful agent.")
+    response = my_main_agent_llm.chat(messages=compacted, tools=[...])
+    return response
+```
+
+`process()` automatically:
+- diffs `history` against what it already has stored for `session_id` and appends only new messages,
+- checks token count of the reconstructed context,
+- if over `token_threshold`, evicts the oldest messages beyond `preserve_last_n` into a new cascaded summary block (calling your `summarizer_client` once per eviction),
+- persists everything to the configured store,
+- returns the final context to send to the model.
+
+### 4. Let the agent recover original content on demand
+
+Evicted raw messages aren't gone — they're stored under the `memory_id` shown in
+each summary block's rendered text. Wire up the `load_memory` tool so the main
+agent can pull them back when a summary alone isn't enough:
+
+```python
+from cascade_memory.tools import LOAD_MEMORY_TOOL_SPEC, LoadMemoryHandler
+
+load_memory = LoadMemoryHandler(store=middleware.store, session_id=session_id)
+
+# 1. include the tool spec in your LLM call alongside your other tools
+tools = [LOAD_MEMORY_TOOL_SPEC, ...]
+
+# 2. when the model calls it, resolve with the handler
+def handle_tool_call(tool_call) -> list[dict]:
+    if tool_call.name == "load_memory":
+        return load_memory(memory_id=tool_call.input["memory_id"])
+    ...
+```
+
+The handler returns the original raw message list that summary block replaced —
+inject it back as a tool result for that turn (don't permanently merge it into
+preserved history; it's a one-off lookup).
+
+### 5. Storage backends
+
+- **`filesystem`** (default): `{storage_path}/{session_id}/state.json` and
+  `{storage_path}/{session_id}/records/{memory_id}.json`.
+- **`s3`**: same logical layout under `s3://{storage_path}/{session_id}/...`. Uses
+  `boto3` with default credential resolution (env vars, profile, instance role, etc.):
+
+  ```python
+  config = MemoryConfig(
+      summarizer_client=MySummarizerClient(),
+      storage_backend="s3",
+      storage_path="my-bucket-name",
+  )
+  ```
+
+  For a custom prefix or an explicit `boto3` client (e.g. a non-default region or
+  assumed-role session), construct the store yourself and pass it directly:
+
+  ```python
+  from cascade_memory.memory_store.s3 import S3MemoryStore
+  import boto3
+
+  store = S3MemoryStore(bucket="my-bucket", prefix="agents/prod", client=boto3.client("s3", region_name="eu-west-1"))
+  config = MemoryConfig(summarizer_client=MySummarizerClient(), store=store)
+  ```
+
+### 6. Framework adapters
+
+For raw API loops (no framework), wrap your chat function directly:
+
+```python
+from cascade_memory.adapters import wrap_chat_function
+
+chat = wrap_chat_function(my_llm_client.chat, middleware, session_id="session-123")
+response = chat(messages)  # messages are compacted automatically before the call
+```
+
+For LangChain (LCEL/LangGraph `Runnable`s expecting `{"messages": [...]}`):
+
+```python
+from cascade_memory.adapters.langchain import wrap_runnable
+
+chain = wrap_runnable(my_runnable, middleware, session_id="session-123")
+chain.invoke({"messages": history})
+```
+
+For the Claude Agent SDK, register the hook at whatever "before model call" extension
+point that SDK version exposes:
+
+```python
+from cascade_memory.adapters.claude_agent_sdk import CascadingMemoryHook
+
+hook = CascadingMemoryHook(middleware, session_id="session-123")
+# register hook.before_model_call per the SDK's hook registration API
+```
+
+## Full minimal example
+
+```python
+from cascade_memory import CascadingMemoryMiddleware, MemoryConfig
+from cascade_memory.tools import LOAD_MEMORY_TOOL_SPEC, LoadMemoryHandler
+
+class AnthropicSummarizerClient:
+    def __init__(self, client):
+        self.client = client
+
+    def complete(self, messages, **kwargs) -> str:
+        system = next(m["content"] for m in messages if m["role"] == "system")
+        user = next(m["content"] for m in messages if m["role"] == "user")
+        resp = self.client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=1024,
+            system=system,
+            messages=[{"role": "user", "content": user}],
+        )
+        return resp.content[0].text
+
+import anthropic
+client = anthropic.Anthropic()
+
+middleware = CascadingMemoryMiddleware(MemoryConfig(
+    summarizer_client=AnthropicSummarizerClient(client),
+    token_threshold=10_000,
+    preserve_last_n=20,
+))
+
+session_id = "demo-session"
+history: list[dict] = []
+
+def turn(user_text: str) -> str:
+    history.append({"role": "user", "content": user_text})
+    compacted = middleware.process(history, session_id=session_id)
+    resp = client.messages.create(model="claude-sonnet-4-6", max_tokens=1024, messages=compacted)
+    reply = resp.content[0].text
+    history.append({"role": "assistant", "content": reply})
+    return reply
+```
 
 ## Development
 
@@ -60,3 +237,7 @@ ruff check .
 mypy
 pytest
 ```
+
+CI (`.github/workflows/ci.yml`) runs lint, type-check, and tests on Python 3.10–3.12
+on every push/PR, and publishes to PyPI on `v*` tag pushes (once `PYPI_API_TOKEN` is
+configured as a repo secret).
