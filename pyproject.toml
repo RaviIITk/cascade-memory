@@ -1,0 +1,61 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "cascade-memory"
+version = "0.1.0"
+description = "Framework-agnostic cascading context/memory manager for LLM agent loops."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+authors = [{ name = "Ravi Tiwari" }]
+keywords = ["llm", "agent", "memory", "context", "summarization", "middleware"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+dependencies = [
+    "tiktoken>=0.7.0",
+    "boto3>=1.34.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-cov>=5.0.0",
+    "moto[s3]>=5.0.0",
+    "ruff>=0.6.0",
+    "mypy>=1.11.0",
+    "boto3-stubs[s3]>=1.34.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/ravitiwari/cascade-memory"
+Repository = "https://github.com/ravitiwari/cascade-memory"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/cascade_memory"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "N", "SIM", "C4"]
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+packages = ["cascade_memory"]
+mypy_path = "src"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra -q"
