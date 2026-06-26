@@ -187,6 +187,51 @@ hook = CascadingMemoryHook(middleware, session_id="session-123")
 # register hook.before_model_call per the SDK's hook registration API
 ```
 
+For **DeepAgents** (LangChain 1.0's middleware-based agent harness) — DeepAgents
+runs every model call through a composable `AgentMiddleware` stack, where each
+middleware implements `wrap_model_call(request, handler)` and can rewrite
+`request.messages` before calling `handler()`. `make_deepagents_middleware` builds
+exactly that middleware around `cascade_memory`:
+
+```python
+from deepagents import create_deep_agent
+from cascade_memory.adapters.deepagents import make_deepagents_middleware
+
+agent = create_deep_agent(
+    model=model,
+    tools=tools,
+    middleware=[make_deepagents_middleware(middleware, session_id="session-123")],
+)
+agent.invoke({"messages": history})
+```
+
+Because it's a normal middleware entry, it composes cleanly alongside DeepAgents'
+other built-ins (`SubAgentMiddleware`, `FilesystemMiddleware`, `SummarizationToolMiddleware`,
+etc.) — `cascade_memory` simply runs as one more layer in that same stack, guaranteeing
+every model call sees a bounded context regardless of what the other middleware does.
+
+For **Strands Agents** (AWS's agent SDK) — Strands extends agents via `Plugin`
+objects: `@hook`-decorated methods register against typed lifecycle events (here,
+`BeforeModelCallEvent`), and `@tool`-decorated methods are added to the agent's
+tool list automatically. `make_strands_plugin` builds a plugin that both compacts
+messages before every model call *and* registers `load_memory` as a callable tool
+in one step:
+
+```python
+from strands import Agent
+from cascade_memory.adapters.strands import make_strands_plugin
+
+agent = Agent(
+    model="anthropic.claude-sonnet-4-6",
+    plugins=[make_strands_plugin(middleware, session_id="session-123")],
+)
+agent("What's the status of the task we started earlier?")
+```
+
+No separate tool wiring needed here — the plugin's `init_agent` hook attaches
+`load_memory_tool` to the agent for you, so the model can call it directly whenever
+a summary block isn't detailed enough.
+
 ### 7. Integrating as a hook/middleware plugin in *any* framework
 
 `cascade_memory.adapters` ships ready-made wrappers for raw chat loops, LangChain,
