@@ -33,10 +33,10 @@ try:
     # NOTE: BeforeModelCallEvent must keep this exact name at module level --
     # Strands' @hook decorator resolves the callback's string annotation against
     # this module's globals via typing.get_type_hints.
-    from strands import tool as _strands_tool
-    from strands.hooks import BeforeModelCallEvent
-    from strands.plugins import Plugin as _StrandsPlugin
-    from strands.plugins import hook as _strands_hook
+    from strands import tool as _strands_tool  # type: ignore[import-not-found]
+    from strands.hooks import BeforeModelCallEvent  # type: ignore[import-not-found]
+    from strands.plugins import Plugin as _StrandsPlugin  # type: ignore[import-not-found]
+    from strands.plugins import hook as _strands_hook  # type: ignore[import-not-found]
 
     _STRANDS_AVAILABLE = True
 except ImportError:
