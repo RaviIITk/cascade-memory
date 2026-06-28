@@ -347,7 +347,7 @@ surfaced two real bugs, both fixed and covered by what's documented above:
 | **LangChain Runnable** | 5-turn live conversation through `wrap_runnable` | 3 cascaded summary blocks created |
 | **DeepAgents** | 5-turn live conversation through `make_deepagents_middleware` with `create_deep_agent` | Found and fixed a real bug: LangChain passes `BaseMessage` objects (`HumanMessage`/`AIMessage`/...), not plain dicts — this crashed the JSON-backed store on first eviction. Fixed by converting at the boundary with `convert_to_openai_messages`/`convert_to_messages`. After the fix: full live run, multiple cascaded blocks created |
 | **Claude Agent SDK** | `CascadingMemoryHook.before_model_call` called directly with a live summarizer | 3 cascaded blocks created correctly. The SDK's own agent loop only talks to Anthropic models, so a full SDK-driven run wasn't possible here — the hook logic itself is what's verified |
-| **Strands Agents** | Plugin mechanics (hook firing, `@tool` auto-registration, message conversion) plus one full live turn | Found and fixed two real bugs: `BeforeModelCallEvent` carries no `messages` field (the live conversation is on `event.agent.messages`), and Strands uses Bedrock-style content blocks (`[{"text": ...}]`), not flat `{"role", "content"}` dicts. Also discovered Strands' `@hook` decorator infers its event type via `typing.get_type_hints`, which fails if the event type isn't a real module-level name — a local import inside a factory function silently breaks registration. After fixing all three: hook fires correctly, tool auto-registers, one full multi-turn cascade observed live; further runs were occasionally blocked by intermittent hangs in NVIDIA NIM's endpoint itself (reproduced even with a bare `Agent`, no plugin involved) |
+| **Strands Agents** | 2-turn live conversation through a `make_strands_plugin`-built plugin | Found and fixed two real bugs: `BeforeModelCallEvent` carries no `messages` field (the live conversation is on `event.agent.messages`), and Strands uses Bedrock-style content blocks (`[{"text": ...}]`), not flat `{"role", "content"}` dicts. Also discovered Strands' `@hook` decorator infers its event type via `typing.get_type_hints`, which fails if the event type isn't a real module-level name — a local import inside a factory function silently breaks registration. After fixing all three: hook fires correctly, `load_memory_tool` auto-registers on the agent, 1 cascaded summary block created, `load_memory` retrieval confirmed — clean full run with no errors |
 
 Takeaways if you're integration-testing against your own LLM endpoint:
 - Don't assume `list[dict]` — frameworks built on LangChain pass typed message
@@ -356,10 +356,6 @@ Takeaways if you're integration-testing against your own LLM endpoint:
 - If a framework's event/hook type inference relies on `typing.get_type_hints`
   (Strands does), keep the relevant imports as real module-level names, not
   local imports inside a closure/factory function.
-- Smaller instruction-tuned models can be unreliable tool-callers (hallucinated
-  tool names, ignoring "don't use tools" instructions) — this looks like a
-  framework or adapter bug but is actually a model-capability issue. Test with
-  a model known to support function-calling well before debugging further.
 
 ## Development
 
